@@ -1,0 +1,9 @@
+ultralytics>=8.3.0
+opencv-python>=4.9.0
+PyYAML>=6.0
+python-dotenv>=1.0.0
+numpy>=1.26.0
+lapx>=0.5.5
+streamlit>=1.39           # the dashboard (dashboard/app.py)
+pandas>=2.0
+Pillow>=10.0

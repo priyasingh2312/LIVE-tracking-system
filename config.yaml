@@ -1,0 +1,92 @@
+# ---- Video source -------------------------------------------------------
+# type: rtsp (IP camera) | webcam | file
+source:
+  type: rtsp               # IP camera. Put the address in .env as RTSP_URL (keeps the password out of git)
+  rtsp_url: ""             # or write it here (not recommended: the password would be in this file)
+  webcam_index: 0          # only for type: webcam (0 = default laptop/USB webcam)
+  file_path: ""            # only for type: file (a recorded video, handy for repeatable tests)
+  width: 1280              # requested capture size (webcam only)
+  height: 720
+
+# ---- Mode ----------------------------------------------------------------
+# follow = select objects on a frozen frame, then FOLLOW them wherever they go (default, any object)
+# select = select objects, but only watch the spot where they were selected
+# detect = automatically track phones with YOLO (no selection step)
+mode: follow
+
+# ---- Compute -------------------------------------------------------------
+# cpu now; switch to "cuda:0" on the GPU server (no code change needed)
+device: cpu
+
+# ---- Object detector + tracker (phones) ---------------------------------
+detector:
+  model: yolo11n.pt        # nano = CPU friendly. Use yolo11s/m.pt on GPU.
+  imgsz: 640
+  conf: 0.35
+  tracker: bytetrack.yaml  # or botsort.yaml
+  classes: [cell phone]    # COCO class names to track as "the object"
+
+# ---- People detector + pose (gives wrist positions) ---------------------
+pose:
+  model: yolo11n-pose.pt
+  imgsz: 640
+  conf: 0.40
+  tracker: bytetrack.yaml
+  classes: [person]
+  kp_conf: 0.4             # min keypoint confidence to trust a wrist
+
+# ---- Pickup logic (modes follow + detect; distances are relative to the object's size) --
+pickup:
+  hand_margin: 0.8         # wrist must be within 0.8x phone size of the phone box
+  hold_frames: 4           # ...for this many processed frames in a row
+  move_thresh: 0.8         # phone must move 0.8x its size from its resting spot
+  require_movement: true   # false = fire even if phone never moved (easier testing)
+  release_frames: 8        # frames without a hand nearby before phone counts as released
+  lost_frames: 15          # forget a phone track after this many missing frames
+  cooldown_sec: 3.0        # min seconds between events for the same phone
+  switch_frames: 8         # frames someone else must be closest before a hand-over is reported
+
+# ---- Follow mode ------------------------------------------------------------
+follow:
+  models_dir: models       # the tracker model (~0.7 MB) is downloaded here on first run
+  min_score: 0.35          # tracker confidence below this = object not found in this frame
+  reacquire_every: 5       # when the object is lost, search the whole frame every N processed frames
+  reacquire_thresh: 0.7    # picture similarity needed to accept "found it again"
+  lost_report_frames: 30   # print "LOST" after the object has been missing this many frames
+  lost_frames: 90          # keep its state this long while it is hidden (e.g. inside a hand)
+
+# ---- Zone watcher (mode: select) ------------------------------------------
+watch:
+  zones_file: zones.json   # selected boxes are saved here (use --reuse-zones to skip selecting)
+  ncc_thresh: 0.5          # patch similarity below this = object looks different
+  mad_thresh: 12           # ...and mean pixel difference above this
+  absent_frames: 6         # processed frames the object must stay gone (hand away) before alert
+  return_frames: 10        # frames it must look right again to count as returned
+  touch_margin: 0.5        # a wrist within this x object size of the box = hand in zone
+  box_overlap: 0.5         # person box covering this much of the zone = fallback "nearby"
+  contact_window_sec: 6.0  # how long a touch is remembered when blaming a person
+
+# ---- Faces: who took it, authorised or not -------------------------------
+faces:
+  enabled: true
+  db_path: data/faces.db   # known + unknown people and the event log (private data, git-ignored)
+  data_dir: data           # face crops of known/unknown people and alert snapshots go here
+  models_dir: models       # face models are downloaded here on first run (~39 MB)
+  known_thresh: 0.45       # cosine similarity needed to accept someone as an enrolled person
+  unknown_thresh: 0.363    # similarity to link a new face to an already-saved unknown person
+  det_thresh: 0.7          # face detector confidence
+  min_face_px: 40          # ignore faces narrower than this (too small to recognise)
+  min_person_width: 40    # don't even look for faces on people narrower than this
+  face_every: 4            # try a face on each person every N processed frames
+  q_good: 0.5              # face quality that is "good enough" to decide immediately
+  face_wait_sec: 5.0       # after a pickup, wait this long for a usable face, then raise UNIDENTIFIED
+  max_obs: 6               # best face samples remembered per tracked person
+  alert_dedupe_sec: 60     # same unknown person + same object: one alert per this many seconds
+  beep: true               # sound on alert (Windows)
+
+# ---- Runtime -------------------------------------------------------------
+runtime:
+  frame_skip: 2            # run detection on every Nth frame (CPU speed-up)
+  show_window: true        # press q or Esc to quit
+  display_width: 1280      # large camera images are shown scaled to this width (analysis stays full size)
+

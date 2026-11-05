@@ -1,0 +1,27 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+# model weights, footage, generated output
+*.pt
+*.onnx
+*.mp4
+*.avi
+*.mkv
+data/
+output/
+snapshots/
+logs/
+*.db
+*.sqlite
+zones.json
+models/
+
+# local files that should not be shared
+camera_test.jpg
+Claude outputs/
+Ultralytics/
+*.log
+.streamlit/secrets.toml
+*.pdf
+.DS_Store

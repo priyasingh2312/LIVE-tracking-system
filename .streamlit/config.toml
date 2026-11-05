@@ -1,0 +1,16 @@
+[server]
+# the other dashboard (Live CCTV analytics) uses 8501, so this one uses 8502. Change the number here,
+# or override once with:  streamlit run dashboard/app.py --server.port 8503
+port = 8502
+
+[client]
+# hides the Deploy button and menu but keeps the sidebar controls
+toolbarMode = "minimal"
+
+[theme]
+base = "light"
+primaryColor = "#0F9D8F"
+backgroundColor = "#F3F7FB"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#1B2430"
+font = "sans serif"
