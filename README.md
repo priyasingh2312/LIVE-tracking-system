@@ -8,6 +8,11 @@ where the object was, so the tracker first searches the **whole frame** for each
 side) and moves the outline to where it is now. An object that is still in place stays put; one that cannot be found keeps its saved place
 and a message is printed in the tracker log.
 
+### Body pictures are learned automatically
+You can enrol a person with the face only. Whenever the tracker recognises an enrolled person by face and they are alone in their box,
+it saves their body fingerprint and picture (up to `learn_body_max`, default 6, only when it is a clearly new view). The body never authorises
+anyone, it only helps the record and re-identification. Settings under `faces:` in `config.yaml`: `learn_body` (true/false), `learn_body_max`.
+
 ## What you see and what is printed
 
 | Event | Screen | Console |

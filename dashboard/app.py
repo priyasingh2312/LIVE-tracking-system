@@ -113,6 +113,14 @@ st.markdown("""
 .feed-item .th:hover {z-index: 999999;}
 .feed-item .th:hover img {position: absolute; right: -4px; top: -4px; width: 480px; max-width: 60vw; height: auto;
     border: 1px solid #3B82F6; border-radius: 6px; background: #fff; box-shadow: 0 8px 28px rgba(0,0,0,.35); object-fit: contain; pointer-events: none;}
+.lb {display: none;}
+.lb:target {display: flex; position: fixed; inset: 0; z-index: 99999999; background: rgba(8,16,30,.88); align-items: center; justify-content: center;}
+.lb .lbi {display: flex; max-width: 94vw; max-height: 92vh; cursor: zoom-out;}
+.lb .lbi img {max-width: 94vw; max-height: 92vh; width: auto; height: auto; border-radius: 8px; object-fit: contain; box-shadow: 0 10px 40px rgba(0,0,0,.6);}
+.lb .lbx {position: absolute; top: 14px; right: 22px; color: #fff; font-size: 38px; line-height: 1; text-decoration: none; cursor: pointer;}
+.al-wait{background:#fff7e6;border:1px solid #f5d28a;border-left:5px solid #e8a317;border-radius:10px;padding:9px 14px;color:#7a4b00;margin-bottom:10px;font-size:.92rem}
+.al-banner{margin-bottom:12px;background:#fdecea;border:1px solid #f1b0a8;border-left:5px solid #c62828;border-radius:10px;padding:10px 14px;color:#7f1d1d}
+.al-banner .al-t{font-weight:700;font-size:.95rem;margin-bottom:2px}.al-banner .al-row{font-size:.9rem;padding:1px 0}
 .dtitle {font-weight: 700; font-size: 1.05rem; color: #0F1B2D; margin-top: 10px;}
 .dsub {color: #667085; margin: 2px 0 10px 0; font-size: .92rem;}
 .drow {display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 2px; border-bottom: 1px solid #EEF1F6; font-size: .9rem;}
@@ -146,6 +154,13 @@ st.markdown("""
 .pcard {background: #fff; border: 1px solid #E3E8F0; border-radius: 12px; padding: 12px; margin-bottom: 10px;}
 .pcard .imgs {display: flex; gap: 8px; margin-bottom: 8px;}
 .pcard img {height: 110px; border-radius: 8px; border: 1px solid #E3E8F0; object-fit: cover; background: #EEF1F6;}
+.dpw {position: relative; cursor: zoom-in; display: inline-block; max-width: 100%;}
+.dpw .dpz {height: auto; object-fit: contain;}
+.dsnap {height: auto !important; max-height: 360px;}
+.dpw .dpz {display: none; position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 99999999; pointer-events: none;
+    max-width: 70vw; max-height: 80vh; width: auto; height: auto; border: 2px solid #3B82F6; border-radius: 8px; background: #fff;
+    box-shadow: 0 12px 40px rgba(0,0,0,.45);}
+.dpw:hover .dpz, [class*="st-key-ptile_"]:hover .pcard .dpz {display: block;}
 .dpic {width: 100%; height: 130px; object-fit: contain; border-radius: 8px; border: 1px solid #E3E8F0; background: #EEF1F6;}
 .pgrid {display: flex; flex-wrap: wrap; gap: 8px;}
 .pgrid img {height: 150px; border-radius: 8px; border: 1px solid #E3E8F0; object-fit: cover; background: #EEF1F6;}
@@ -317,9 +332,12 @@ def load_events(days: int | None = None) -> pd.DataFrame:
             df["item"] = df["item"].map(dict(zip(on["label"], on["name"]))).fillna(df["item"])
         df["dt"] = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(datetime.now().astimezone().tzinfo)
         # how many pickups this unknown person has made up to and including this one (1 = first time), not how often the face was seen
-        allev = query("SELECT id, unknown_id FROM events WHERE unknown_id IS NOT NULL ORDER BY ts ASC, id ASC")
+        allev = query("SELECT id, ts, unknown_id, alert FROM events WHERE unknown_id IS NOT NULL ORDER BY ts ASC, id ASC")
         if not allev.empty:
-            allev["nth"] = allev.groupby("unknown_id").cumcount() + 1
+            # counts this person's real alerts only: a suppressed repeat (same person + object within the duplicate window) does not add a number
+            # ...counted per person PER DAY (local date): every new day starts again at 1
+            allev["day"] = pd.to_datetime(allev["ts"], unit="s", utc=True).dt.tz_convert(datetime.now().astimezone().tzinfo).dt.date
+            allev["nth"] = (allev["alert"].fillna(0).astype(int) == 1).groupby([allev["unknown_id"], allev["day"]]).cumsum().clip(lower=1)
             df["times_seen"] = df["id"].map(dict(zip(allev["id"], allev["nth"])))
         else:
             df["times_seen"] = float("nan")
@@ -335,7 +353,7 @@ def what_happened(r) -> tuple[str, str, str]:
         return f"{r['name']} took {item}{sim}", label_, kind
     if r["status"] == "unauthorised":
         times = int(r["times_seen"]) if pd.notna(r.get("times_seen")) else 0
-        more = f" (pickup no. {times})" if times > 0 else ""
+        more = f" (pickup no. {times} today)" if times > 0 else ""
         who = f"Unknown person #{int(r['unknown_id'])}" if pd.notna(r["unknown_id"]) else "Unknown person"
         if pd.notna(r.get("uname")) and str(r.get("uname")).strip():
             who = f"{r['uname']} (unauthorised, unknown #{int(r['unknown_id'])})"
@@ -390,6 +408,82 @@ def app_header():
     st.markdown(f'<div class="apphead"><div class="l"><span class="nm">{esc(TITLE)}</span><span class="sb">{esc(SUBTITLE)}</span></div>'
                 f'<div class="r">{chip("Tracker running", "ok") if run else chip("Tracker stopped", "idle")}<span class="dt">{now}</span></div></div>',
                 unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------- real-time alerts (every page)
+def _beep_wav() -> bytes:
+    import io, math, struct, wave
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        for hz, ms in ((880, 160), (0, 70), (880, 160), (0, 70), (1175, 260)):
+            for i in range(int(16000 * ms / 1000)):
+                v = 0.0 if hz == 0 else 0.5 * math.sin(2 * math.pi * hz * i / 16000) * min(1.0, (ms * 16 - i) / 400)
+                w.writeframes(struct.pack("<h", int(v * 32767)))
+    return buf.getvalue()
+
+
+def _dismiss_alerts():
+    st.session_state["alerts_new"] = []
+
+
+@frag(2)
+def alert_watch():
+    """Checks for new pickups every 2 seconds on whatever page is open: pop-up, red banner and a short sound for an alert."""
+    status, running, _ = live_state()
+    pend = status.get("pending") or [] if running else []
+    if pend:                                                         # picked up a moment ago, the person is still being identified
+        names_ = ", ".join(sorted({str(q.get("item", "object")) for q in pend}))
+        st.markdown(f'<div class="al-wait"><b>Pickup detected</b> &nbsp; {esc(names_)} was taken - identifying the person...</div>',
+                    unsafe_allow_html=True)
+    top_df = query("SELECT MAX(id) AS m FROM events")
+    top = int(top_df["m"].iloc[0]) if not top_df.empty and pd.notna(top_df["m"].iloc[0]) else 0
+    if top == 0:
+        st.session_state.setdefault("alert_seen", 0)
+        return
+    if "alert_seen" in st.session_state and top <= int(st.session_state["alert_seen"]) and not st.session_state.get("alerts_new"):
+        return                                                       # nothing new: skip the heavier query
+    ev = load_events(1)
+    if ev.empty:
+        return
+    top = int(ev["id"].max())
+    if "alert_seen" not in st.session_state:
+        st.session_state["alert_seen"] = top                         # do not replay what happened before this page was opened
+        st.session_state["alerts_new"] = []
+        return
+    seen = int(st.session_state["alert_seen"])
+    fresh = ev[ev["id"] > seen].sort_values("id")
+    st.session_state["alert_seen"] = max(seen, top)
+    ring = False
+    for _, r in fresh.iterrows():
+        headline, label_, kind = what_happened(r)
+        is_alert = r["status"] in ("unauthorised", "unidentified") and int(r["alert"] or 0) == 1
+        stamp = r["dt"].strftime("%H:%M:%S")
+        if is_alert:
+            st.session_state.setdefault("alerts_new", []).insert(0, (stamp, headline))
+            ring = True
+            try:
+                st.toast(f"**ALERT** {headline}", icon="\U0001F6A8")
+            except Exception:
+                pass
+        elif r["status"] == "authorised":
+            try:
+                st.toast(headline, icon="\u2705")
+            except Exception:
+                pass
+    items = st.session_state.get("alerts_new", [])[:3]
+    if items:
+        rows = "".join(f'<div class="al-row"><b>{esc(t)}</b> &nbsp; {esc(h)}</div>' for t, h in items)
+        c1, c2 = st.columns([8, 1])
+        c1.markdown(f'<div class="al-banner"><div class="al-t">Unauthorised pickup</div>{rows}</div>', unsafe_allow_html=True)
+        c2.button("Dismiss", key="al_dismiss", on_click=_dismiss_alerts)
+    if ring:
+        try:
+            st.audio(_beep_wav(), format="audio/wav", autoplay=True)
+        except Exception:
+            pass
 
 
 UI_FILE = DATA_DIR / "ui.json"
@@ -480,6 +574,7 @@ def sidebar_css(pinned: bool) -> str:
 
 
 app_header()
+alert_watch()
 with st.sidebar:
     st.markdown(sidebar_css(st.session_state["pinned"]), unsafe_allow_html=True)
     st.button("Collapse menu" if st.session_state["pinned"] else "Expand menu", key="nav_pin", on_click=_toggle_pin, **STRETCH)
@@ -514,7 +609,7 @@ def _selected_cam():
     return c, sel
 
 
-@frag(1)
+@frag(0.2)                                   # the picture refreshes about 5 times a second: close to what the tracker window showed
 def live_card():
     status, running, frame = live_state()
     cam, sel = _selected_cam()
@@ -543,8 +638,15 @@ def feed_html(df: pd.DataFrame, limit: int = 8) -> str:
     out = []
     for _, r in df.head(limit).iterrows():
         headline, label_, kind = what_happened(r)
-        uri = thumb(resolve(r["snapshot"]), 480)
-        th = f'<span class="th"><img src="{uri}"></span>' if uri else '<div class="ph"></div>'
+        sp = resolve(r["snapshot"])
+        uri = thumb(sp, 480)
+        if uri:
+            big = thumb(sp, 1400)
+            lid = f"lb{int(r['id'])}"
+            th = (f'<a class="th" href="#{lid}"><img src="{uri}"></a>'
+                  f'<div class="lb" id="{lid}"><a class="lbx" href="#!">&times;</a><a class="lbi" href="#!"><img src="{big}"></a></div>')
+        else:
+            th = '<div class="ph"></div>'
         repeat = " (repeat, no new alert)" if r["status"] != "authorised" and not r["alert"] else ""
         out.append(f'<div class="feed-item">{th}<div><div class="t">{esc(headline)}</div>'
                    f'<div class="e {kind}">{esc(label_)}{esc(repeat)}</div><div class="w">{esc(ago(r["ts"]))}</div></div></div>')
@@ -591,7 +693,9 @@ def feed_card():
         h1, h2 = st.columns([1.3, 1])
         h1.markdown(f'<div class="card-title">Recent pickups</div><div class="card-sub">{esc(sel)}{" - " + esc(cam.get("name","")) if cam and cam.get("name") else ""}</div>',
                     unsafe_allow_html=True)
-        h2.button("View all \u2192", key="btn_viewall", on_click=_go_log, type="tertiary")
+        if h2.button("View all \u2192", key="btn_viewall", type="tertiary"):
+            _go_log()
+            st.rerun(scope="app")      # the button lives inside a fragment: ask for a full page rerun so the page switches
         st.markdown(feed_html(ev, 6), unsafe_allow_html=True)
 
 
@@ -1068,7 +1172,7 @@ def alert_details(r):
         st.markdown(f'<div class="dtitle">{esc(r["item"] or "object")}</div><div class="dsub">{esc(headline)}</div>', unsafe_allow_html=True)
         path = resolve(r["snapshot"])
         if path is not None:
-            st.image(str(path), **STRETCH)
+            st.markdown(zoomimg(path, 640, 1600, "dpic dsnap"), unsafe_allow_html=True)
         else:
             st.markdown('<div class="quiet">The snapshot file is not available.</div>', unsafe_allow_html=True)
         times = int(r["times_seen"]) if pd.notna(r.get("times_seen")) else 1
@@ -1076,7 +1180,7 @@ def alert_details(r):
         _detail_row("Camera", esc(str(r["camera"]) if pd.notna(r["camera"]) and str(r["camera"]).strip() else "-"))
         _detail_row("Person", esc(_who(r)))
         _detail_row("Result", f'<span class="rchip {kind}">{esc(label_)}</span>')
-        _detail_row("Count", str(max(times, 1)))
+        _detail_row("Pickup no. today", str(max(times, 1)))
         if r["status"] != "authorised":
             done = bool(int(r["reviewed"] or 0))
             _detail_row("Status", f'<span class="rchip {"ok" if done else "idle"}">{"Reviewed" if done else "Unreviewed"}</span>')
@@ -1196,8 +1300,8 @@ def enrol_panel():
         c = ctl()
         p = c.get("enrol")
         if p is not None and p.poll() is None:
-            st.info(f"Enrolling {c.get('enrol_name', '')}: a window opened on this PC. Look at the camera, turn your head slowly "
-                    "and step back so your whole body is in view. It closes by itself when done (q cancels).")
+            st.info(f"Enrolling {c.get('enrol_name', '')}: a window opened on this PC. Press START, turn your head slowly "
+                    "and step back so your whole body is in view, then press STOP & SAVE. CANCEL (or q) discards.")
         elif p is not None:
             try:
                 lines = [x for x in ENROL_LOG.read_text(encoding="utf-8", errors="replace").splitlines() if x.strip()]
@@ -1238,8 +1342,17 @@ def enrol_panel():
 
 # ---------------------------------------------------------------- people tiles: face on the tile, all pictures on click
 def _grid(paths, width=300) -> str:
-    imgs = "".join(f'<img src="{u}">' for u in (thumb(Path(x), width) for x in paths) if u)
+    imgs = "".join(zoomimg(x, width, 900) for x in paths)
     return f'<div class="pgrid">{imgs}</div>' if imgs else '<div class="quiet">None saved.</div>'
+
+
+def zoomimg(path, small: int = 240, big: int = 900, cls: str = "") -> str:
+    """A picture that shows a large copy in the middle of the screen while the mouse is over it."""
+    u = thumb(Path(path), small) if path else None
+    if not u:
+        return ""
+    b = thumb(Path(path), big) or u
+    return f'<span class="dpw"><img class="{cls}" src="{u}"><img class="dpz" src="{b}"></span>'
 
 
 def _dialog(title):
@@ -1442,9 +1555,9 @@ def show_person(kind: str, ident, title: str):
             for r0 in range(0, len(paths), 5):
                 cols = st.columns(5)
                 for j, pth in enumerate(paths[r0:r0 + 5]):
-                    u = thumb(Path(pth), 240)
+                    u = zoomimg(pth, 240, 900, "dpic")
                     if u:
-                        cols[j].markdown(f'<img class="dpic" src="{u}">', unsafe_allow_html=True)
+                        cols[j].markdown(u, unsafe_allow_html=True)
                     cols[j].button("Delete", key=f"dp_{group}_{r0 + j}", on_click=_delete_picture,
                                    args=(kind, ident, pth, group))
         if kind == "unknown":
@@ -1549,10 +1662,10 @@ def show_person_msg():
 def person_tile(col, key: str, title: str, meta: str, faces: list, bodies: list, status: str, kind: str = "known", ident=None):
     """A card with ONE picture (the face; the body only if no face was ever saved). Clicking it opens every saved picture."""
     first = (faces or bodies or [None])[0]
-    u = thumb(Path(first), 220) if first else None
+    u = zoomimg(first, 220, 900) if first else ""
     with col:
         with kcontainer("ptile_" + key):
-            st.markdown(f'<div class="pcard"><div class="imgs">{f"<img src=\"{u}\">" if u else "<div class=ph></div>"}</div>'
+            st.markdown(f'<div class="pcard"><div class="imgs">{u if u else "<div class=ph></div>"}</div>'
                         f'<div class="n">{esc(title)}</div><div class="m">{esc(meta)}</div>'
                         f'<div class="m">{esc(status)} &middot; {len(faces)} face, {len(bodies)} body pictures</div></div>',
                         unsafe_allow_html=True)
@@ -1690,10 +1803,10 @@ def show_object(oid: int, title: str):
         for r0 in range(0, len(files), 5):
             cols = st.columns(5)
             for j, pth in enumerate(files[r0:r0 + 5]):
-                u = thumb(Path(pth), 240)
+                u = zoomimg(pth, 240, 900, "dpic")
                 nm_ = Path(pth).stem
                 if u:
-                    cols[j].markdown(f'<img class="dpic" src="{u}"><div class="quiet" style="margin-top:2px">{esc(nm_)}</div>',
+                    cols[j].markdown(f'{u}<div class="quiet" style="margin-top:2px">{esc(nm_)}</div>',
                                      unsafe_allow_html=True)
                 if nm_ != "crop":
                     cols[j].button("Delete", key=f"odp_{r0 + j}", on_click=_delete_object_picture, args=(oid, pth))
@@ -1705,18 +1818,18 @@ def show_object(oid: int, title: str):
         for _, e in mine.head(6).iterrows():
             headline, label_, kind = what_happened(e)
             a, b = st.columns([1, 4])
-            u = thumb(resolve(e["snapshot"]), 160)
+            u = zoomimg(resolve(e["snapshot"]), 160, 1200, "dpic")
             if u:
-                a.markdown(f'<img class="dpic" src="{u}">', unsafe_allow_html=True)
+                a.markdown(u, unsafe_allow_html=True)
             b.markdown(f'**{esc(headline)}**  \n{esc(label_)} - {e["dt"]:%Y-%m-%d %H:%M}')
     _body()
 
 
 def object_tile(col, oid: int, title: str, meta: str, status: str, first):
-    u = thumb(Path(first), 220) if first else None
+    u = zoomimg(first, 220, 900) if first else ""
     with col:
         with kcontainer(f"ptile_o{oid}"):
-            st.markdown(f'<div class="pcard"><div class="imgs">{f"<img src=\"{u}\">" if u else "<div class=ph></div>"}</div>'
+            st.markdown(f'<div class="pcard"><div class="imgs">{u if u else "<div class=ph></div>"}</div>'
                         f'<div class="n">{esc(title)}</div><div class="m">{esc(meta)}</div><div class="m">{esc(status)}</div></div>',
                         unsafe_allow_html=True)
             if st.button("Open " + title, key=f"open_o{oid}"):

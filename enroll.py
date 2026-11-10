@@ -1,6 +1,6 @@
 """Enrol the people who ARE allowed to take the objects.
 
-  python enroll.py --name Priya                  capture ~8 samples from the webcam (turn your head slightly)
+  python enroll.py --name Priya                  live window: START, turn your head slightly, STOP & SAVE
   python enroll.py --name Priya --images "D:\\photos\\priya"   enrol from a folder of photos instead
   python enroll.py --name Priya --body           add a full-body picture + fingerprint (record only; never used to authorise)
   python enroll.py --list                        show enrolled people
@@ -44,67 +44,113 @@ def _person_for_face(people, face_box):
     return max(inside, key=lambda d: (d.box[2] - d.box[0]) * (d.box[3] - d.box[1]), default=None)
 
 
+def _button(img, rect, text, fill, active=True):
+    x1, y1, x2, y2 = rect
+    cv2.rectangle(img, (x1, y1), (x2, y2), fill if active else (110, 110, 110), -1)
+    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 255, 255), 2)
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.62, 2)
+    cv2.putText(img, text, (x1 + (x2 - x1 - tw) // 2, y1 + (y2 - y1 + th) // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2)
+
+
 def enrol_from_webcam(name, cfg, db, engine, samples, body_samples=4):
-    """Capture face samples AND (when possible) body fingerprints from the camera in cfg['source']."""
+    """Capture face samples AND (when possible) body fingerprints from the camera in cfg['source'].
+
+    Like outlining an object, collection is under your control: the window opens as a live preview, START begins collecting
+    samples, STOP & SAVE ends it and saves them (CANCEL / q discards everything). SPACE toggles start/stop."""
     det, body = _body_tools(cfg)
     src = FrameSource(cfg["source"]).start()
+    max_face, max_body = samples * 3, body_samples * 3                  # safety caps; you decide when to stop
     feats, crops, last = [], [], 0.0
-    bfeats, bcrops, blast, done_at = [], [], 0.0, None
-    print(f"Enrolling '{name}': look at the camera and slowly turn your head a little."
-          + (" Step back a little so your whole body is in view." if body else "") + " q = abort.")
+    bfeats, bcrops, blast = [], [], 0.0
+    ui = {"collecting": False, "act": None, "rects": {}, "msg": ""}
+    print(f"Enrolling '{name}': a live window opened. Press START (or SPACE), slowly turn your head a little"
+          + (" and stand back so your whole body is in view" if body else "") + ", then STOP & SAVE (or SPACE). CANCEL or q = discard.")
+
+    def on_mouse(event, x, y, _f, _p):
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+        for k, (x1, y1, x2, y2) in ui["rects"].items():
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                ui["act"] = k
+
+    cv2.namedWindow("enrol")
+    cv2.setMouseCallback("enrol", on_mouse)
+    saved = False
     try:
         while True:
-            faces_done = len(feats) >= samples
-            if faces_done and done_at is None:
-                done_at = time.time()
-            if faces_done and (body is None or len(bfeats) >= body_samples or time.time() - done_at > 20):
-                break
             ok, frame = src.read()
             if not ok:
                 raise RuntimeError("No frames from the camera.")
             faces = engine.detect_embed(frame, min_face_px=60)
             disp = frame.copy()
             f = max(faces, key=lambda x: x.quality) if faces else None
+            col = ui["collecting"]
             if f is not None:
                 x1, y1, x2, y2 = f.box
-                cv2.rectangle(disp, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(disp, f"quality {f.quality:.2f}", (x1, max(15, y1 - 6)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                cv2.rectangle(disp, (x1, y1), (x2, y2), (0, 255, 0) if col else (200, 200, 200), 2)
+                cv2.putText(disp, f"quality {f.quality:.2f}", (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                 novel = not feats or float((np.stack(feats) @ f.feature).max()) < 0.97
-                if not faces_done and f.quality >= 0.45 and novel and time.time() - last > 0.7:
+                if col and len(feats) < max_face and f.quality >= 0.45 and novel and time.time() - last > 0.7:
                     feats.append(f.feature)
                     crops.append(f.crop)
                     last = time.time()
-                    print(f"  face {len(feats)}/{samples}")
-            if body is not None and len(bfeats) < body_samples and time.time() - blast > 1.5:
+                    print(f"  face {len(feats)}")
+            if body is not None and (col or ui["act"] is None) and time.time() - blast > (1.5 if col else 0.4):
                 people = det.track(frame)
                 person = _person_for_face(people, f.box) if f is not None else (people[0] if len(people) == 1 else None)
                 if person is not None:
                     cv2.rectangle(disp, person.box[:2], person.box[2:], (255, 160, 0), 2)
-                    o = body.embed(frame, person.box)
-                    if o is not None and o.quality >= 0.5:
-                        bfeats.append(o.feature)
-                        bcrops.append(o.crop)
-                        blast = time.time()
-                        print(f"  body {len(bfeats)}/{body_samples}")
-            cv2.putText(disp, f"{name}: face {len(feats)}/{samples}" + (f", body {len(bfeats)}/{body_samples}" if body else ""),
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                    if col and len(bfeats) < max_body:
+                        o = body.embed(frame, person.box)
+                        if o is not None and o.quality >= 0.5:
+                            bfeats.append(o.feature)
+                            bcrops.append(o.crop)
+                            print(f"  body {len(bfeats)}")
+                blast = time.time()
             if disp.shape[1] > 1280:
                 disp = cv2.resize(disp, None, fx=1280 / disp.shape[1], fy=1280 / disp.shape[1])
+            H, W = disp.shape[:2]
+            head = (f"{name}: COLLECTING  face {len(feats)} (aim for {samples}+)" + (f", body {len(bfeats)} (aim for {body_samples}+)" if body else "")) \
+                if col else f"{name}: ready - press START when the person is in view"
+            cv2.rectangle(disp, (0, 0), (W, 44), (30, 30, 30), -1)
+            cv2.putText(disp, head, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 200, 255) if col else (255, 255, 255), 2)
+            if ui["msg"]:
+                cv2.putText(disp, ui["msg"], (10, H - 70), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 120, 255), 2)
+            bw, bh, y = 230, 46, H - 58
+            ui["rects"] = {"toggle": (10, y, 10 + bw, y + bh), "cancel": (W - 10 - 160, y, W - 10, y + bh)}
+            _button(disp, ui["rects"]["toggle"], "STOP & SAVE (SPACE)" if col else "START (SPACE)", (40, 40, 200) if col else (60, 160, 40))
+            _button(disp, ui["rects"]["cancel"], "CANCEL (q)", (90, 90, 90))
             cv2.imshow("enrol", disp)
-            if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
-                print("Aborted, nothing saved.")
+            k = cv2.waitKey(1) & 0xFF
+            act, ui["act"] = ui["act"], None
+            if k == 32:
+                act = "toggle"
+            if k in (ord("q"), 27):
+                act = "cancel"
+            if act == "cancel":
+                print("Cancelled, nothing saved.")
                 return
+            if act == "toggle":
+                if not col:
+                    ui["collecting"], ui["msg"] = True, ""
+                    print("Collecting...")
+                elif not feats:
+                    ui["msg"] = "No face captured yet: face the camera, then press STOP & SAVE again."
+                else:
+                    break
+        saved = True
     finally:
         src.stop()
         cv2.destroyAllWindows()
+    if not saved:
+        return
     db.add_known(name, feats, crops)
     msg = f"Saved {len(feats)} face samples for '{name}'"
     if bfeats:
         db.add_known_body(name, bfeats, bcrops)
         msg += f" and {len(bfeats)} body samples"
     elif body is not None:
-        msg += " (no body picture was captured: stand further back and enrol again with --body)"
+        msg += " (no body picture was taken now: that is fine, they are added automatically the next time the tracker recognises this person)"
     print(msg + ".")
 
 

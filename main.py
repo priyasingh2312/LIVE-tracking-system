@@ -16,6 +16,7 @@ import os
 import time
 
 import cv2
+from src.overlay import label_chip
 import yaml
 from dotenv import load_dotenv
 
@@ -40,7 +41,7 @@ def draw_persons(frame, persons, authz=None):
         shown = authz.display(d.track_id) if authz else None
         color = OK_COLOR if name else (ALERT_COLOR if shown else PERSON_COLOR)
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        tag = shown or "person (identifying...)"
+        tag = shown or (authz.unidentified_text(d.track_id) if authz else "person (identifying...)")
         cv2.putText(frame, tag, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
         for w in d.wrists:
             cv2.circle(frame, (int(w[0]), int(w[1])), 6, (255, 0, 255), -1)
@@ -88,7 +89,7 @@ def draw_followed(frame, follower, holders, authz):
                 continue
             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2          # the object is hidden in the hand: no box, just a marker
             cv2.circle(frame, (cx, cy), 6, col, 2, cv2.LINE_AA)
-            cv2.putText(frame, f"{o.name}: in hand of {who or 'a person (identifying...)'} (hidden)",
+            cv2.putText(frame, f"{o.name}: in hand of {who or ('a ' + authz.unidentified_text(pid) if authz else 'a person (identifying...)')} (hidden)",
                         (cx + 10, max(15, cy - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 2)
             continue
         if o.state == "lost":
@@ -104,7 +105,7 @@ def draw_followed(frame, follower, holders, authz):
             color, tag = (255, 200, 0), f"{o.name}: at rest"
         else:
             who = authz.display(pid) if authz else None
-            color, tag = ALERT_COLOR, f"{o.name}: with {who or 'a person (identifying...)'}"
+            color, tag = ALERT_COLOR, f"{o.name}: with {who or ('a ' + authz.unidentified_text(pid) if authz else 'a person (identifying...)')}"
         if poly is not None:
             cv2.polylines(frame, [poly], True, color, 2)
         else:
@@ -126,7 +127,8 @@ def live_status(follower, pickup, authz, persons, fps, source_type, who_is):
         else:
             text = "At rest"
         objs.append({"name": o.name, "state": o.state, "text": text})
-    return {"fps": round(float(fps), 1), "source": source_type, "people": len(persons), "objects": objs}
+    pend = [{"item": q.item, "ts": q.ts} for q in (authz.pending if authz is not None else [])]   # taken, person not identified yet
+    return {"fps": round(float(fps), 1), "source": source_type, "people": len(persons), "objects": objs, "pending": pend}
 
 
 def describe(d):
@@ -196,7 +198,7 @@ def main():
     disp_w = int(rt.get("display_width", 1280))
     source = FrameSource(cfg["source"]).start()
     dcfg = cfg.get("dashboard", {})
-    live = LiveFeed(dcfg.get("live_dir", "data/live"), float(dcfg.get("frame_every_sec", 0.5))) \
+    live = LiveFeed(dcfg.get("live_dir", "data/live"), float(dcfg.get("frame_every_sec", 0.06))) \
         if dcfg.get("live_feed", True) else None                     # frame + status for dashboard/app.py
     watcher = follower = None
     names: dict[int, str] = {}
@@ -242,6 +244,8 @@ def main():
         persons: list[Detection] = []
         phones: list[Detection] = []
         prev_holders: dict = {}
+        perf = {"t": time.time(), "n": 0, "pose": 0.0, "faces": 0.0, "follow": 0.0}
+        carried_taken: dict = {}
         banner = None
         n, fps, t0 = 0, 0.0, time.time()
 
@@ -249,7 +253,7 @@ def main():
             nm = authz.display(pid) if authz else None
             if pid is None:
                 return "the holder (not tracked)"
-            return nm or "a person (identifying...)"
+            return nm or ("a " + authz.unidentified_text(pid) if authz else "a person (identifying...)")
 
         while True:
             ok, frame = source.read()
@@ -258,9 +262,14 @@ def main():
                 break
             if n % skip == 0:
                 now = time.time()
+                _t = time.perf_counter()
                 persons = person_det.track(frame)
+                perf["pose"] += time.perf_counter() - _t
+                _t = time.perf_counter()
                 if authz:
                     authz.observe(frame, persons, now, n)
+                perf["faces"] += time.perf_counter() - _t
+                _t = time.perf_counter()
                 taken = []          # (item, person_id, person_box, kind)
                 if watcher is not None:
                     for ev in watcher.update(frame, persons, now):
@@ -273,6 +282,13 @@ def main():
                         phones = follower.update(frame, n, persons, pickup.holders)
                         for kind, o, hid in follower.notes:
                             t = time.strftime("%H:%M:%S")
+                            if kind in ("carried", "left") and hid is not None and o.idx not in pickup.holders \
+                                    and now - carried_taken.get(o.idx, -1e9) > 20:
+                                # the object vanished while a person was next to it, before the hand-on-object check could confirm a pickup:
+                                # that is still a pickup, so it must be checked and logged (with a snapshot) like any other
+                                carried_taken[o.idx] = now
+                                hb = next((p.box for p in persons if p.track_id == hid), None)
+                                taken.append((o.name, hid, hb, "taken out of sight"))
                             if kind == "carried":
                                 print(t, f"CARRIED: {o.name} is out of sight, assumed to be with {who_is(hid)}")
                             elif kind == "reset":
@@ -306,6 +322,7 @@ def main():
                                 else:
                                     print(time.strftime("%H:%M:%S"), f"PUT DOWN: {nm} put down, now watched at its new place")
                     prev_holders = cur
+                perf["follow"] += time.perf_counter() - _t
                 for item, pid, pbox, kind in taken:
                     who = f"person #{pid}" if pid is not None else "nobody identified"
                     print(time.strftime("%H:%M:%S"), f"TAKEN: {item} ({who}, {kind})")
@@ -322,6 +339,12 @@ def main():
             if n % 15 == 0:
                 fps = 15 / (time.time() - t0)
                 t0 = time.time()
+            if time.time() - perf["t"] >= 10:                 # where the time goes, in the tracker log (tuning aid)
+                k = max(1, n - perf["n"])
+                print(f"PERF: {fps:.1f} fps | per processed frame: people {1000 * perf['pose'] / max(1, k // skip):.0f} ms, "
+                      f"faces/body {1000 * perf['faces'] / max(1, k // skip):.0f} ms, objects {1000 * perf['follow'] / max(1, k // skip):.0f} ms "
+                      f"| analysing every {skip} frame(s)")
+                perf.update(t=time.time(), n=n, pose=0.0, faces=0.0, follow=0.0)
             if show or live is not None:
                 draw_persons(frame, persons, authz)
                 if watcher is not None:
@@ -332,7 +355,7 @@ def main():
                     draw_phones(frame, phones, pickup.holders)
                 cv2.putText(frame, f"FPS {fps:.1f}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 if banner and time.time() - banner[0] < BANNER_SECONDS:
-                    cv2.putText(frame, banner[1], (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, banner[2], 3)
+                    label_chip(frame, banner[1], banner[2])
                 if disp_w and frame.shape[1] > disp_w:       # only the display is scaled, not the analysis
                     frame = cv2.resize(frame, None, fx=disp_w / frame.shape[1], fy=disp_w / frame.shape[1],
                                        interpolation=cv2.INTER_AREA)

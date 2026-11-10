@@ -347,6 +347,12 @@ class ObjectFollower:
                         hp = None                                  # that person has walked away: not them
                     if hp is not None:
                         holder = o.forced = o.recent[0]
+                if hp is not None and o.state == "tracking" and o.forced is None and self._still_there(o, hsv):
+                    # a hand is near but the object's own colours are still sitting in its box: it was NOT taken
+                    # (the tracker just glitched, e.g. someone passed in front). Keep it where it is.
+                    o.bad = 0
+                    dets.append(Detection(o.idx, o.name, o.score, o.box))
+                    continue
                 if hp is not None and o.state == "tracking":
                     # held by someone and the tracker went bad: assume it travels with the holder
                     o.state, o.carried, o.gone = "carried", True, 0
@@ -433,7 +439,7 @@ class ObjectFollower:
                                  abs((cb[0] + cb[2]) / 2 - (o.cand[0] + o.cand[2]) / 2) < 0.6 * max(o.size0) and
                                  abs((cb[1] + cb[3]) / 2 - (o.cand[1] + o.cand[3]) / 2) < 0.6 * max(o.size0))
                         o.cand, o.cand_n = cb, (o.cand_n + 1 if agree else 1)
-                        if o.cand_n >= 2 and self._overlaps_person(cb, persons) is False:
+                        if o.cand_n >= (2 if self._overlaps_person(cb, persons) is False else 5):
                             found = cand
                 if found is not None:
                     o.cand, o.cand_n = None, 0
@@ -540,19 +546,27 @@ class ObjectFollower:
         cands = []
         ab = self._assist_boxes(o, frame, frame_idx, False)
         if ab:
-            cands += [(b, 1.0) for b in ab]
-        cands += [(b, 0.9) for b in self._blobs(frame, persons)]
-        best, bs = None, 0.0
+            cands += [(b, 1.0, True) for b in ab]
+        cands += [(b, 0.9, False) for b in self._blobs(frame, persons)]
+        best, bs, best_in = None, 0.0, False
         reach = 1.5 * max(o.size0) + 10
-        for b, w in cands:
-            if self._overlaps_person(b, persons) or not self._novel(frame, persons, b):
+        for b, w, from_det in cands:
+            # A person's box often covers the whole desk, so an object standing inside it is NOT hidden by that.
+            # Inside a person box a candidate must look strongly like the object (colour + shape) and be confirmed longer.
+            inside = self._overlaps_person(b, persons)
+            if not from_det and not self._novel(frame, persons, b):
                 continue
             if away and any(max(b[0] - wx, 0, wx - b[2]) ** 2 + max(b[1] - wy, 0, wy - b[3]) ** 2 < reach * reach
                             for wx, wy in away):
                 continue
             sc, nb = self._cand_score(o, frame, hsv, b)
+            if inside:
+                if sc < 0.3:
+                    continue
+                sc *= 0.9
             if nb is not None and sc * w > bs:
                 best, bs = nb, sc * w
+                best_in = inside
         if best is None:
             o.bcand, o.bcand_n = None, 0
             return None
@@ -560,9 +574,18 @@ class ObjectFollower:
                  abs((best[0] + best[2]) / 2 - (o.bcand[0] + o.bcand[2]) / 2) < 0.6 * max(o.size0) and
                  abs((best[1] + best[3]) / 2 - (o.bcand[1] + o.bcand[3]) / 2) < 0.6 * max(o.size0))
         o.bcand, o.bcand_n = best, (o.bcand_n + 1 if agree else 1)
-        return (best, min(0.95, 0.5 + bs)) if o.bcand_n >= need else None
+        return (best, min(0.95, 0.5 + bs)) if o.bcand_n >= need + (2 if best_in else 0) else None
 
     # ------------------------------------------------------------------
+    def _still_there(self, o, hsv) -> bool:
+        """True if the object's colours still fill (most of) its last box."""
+        H, W = hsv.shape[:2]
+        x1, y1, x2, y2 = max(0, o.box[0]), max(0, o.box[1]), min(W, o.box[2]), min(H, o.box[3])
+        if x2 - x1 < 8 or y2 - y1 < 8:
+            return False
+        frac = _fraction_on(_backproject(hsv[y1:y2, x1:x2], self._m(o)))
+        return frac >= max(0.25, 0.7 * o.fill0)
+
     def _track_ok(self, o, frame, hsv, W, H):
         """Run the tracker one step; good = it found something sane AND the box still looks like the object."""
         ok, (x, y, w, h), score = self.eng.step(o.trk, frame)

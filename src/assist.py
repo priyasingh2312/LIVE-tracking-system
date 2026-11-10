@@ -36,8 +36,14 @@ class ObjectAssist:
                                               for b in res.boxes]
         for i, it in enumerate(items):
             best, cid = 0.0, None
+            oa = max(1, (it["box"][2] - it["box"][0]) * (it["box"][3] - it["box"][1]))
             for bx, c, cf in boxes:
+                if self.names[c] == "person":
+                    continue                                   # a thing someone carries is never a person (a person box around it is just the holder)
                 inside, iou = _overlap(tuple(it["box"]), bx)
+                ba = max(1, (bx[2] - bx[0]) * (bx[3] - bx[1]))
+                if ba > 6 * oa:
+                    continue                                   # much bigger than the outlined object: not the same thing
                 score = max(iou, 0.7 * inside) * (0.5 + cf)
                 if max(iou, inside) >= 0.3 and score > best:
                     best, cid = score, c
